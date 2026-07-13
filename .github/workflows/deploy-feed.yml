@@ -46,17 +46,28 @@ jobs:
 
       - name: Generate and Sign ADB Index
         run: |
-          echo "${{ secrets.APK_PRIVATE_KEY }}" > /tmp/repo_private_key.rsa
-          chmod 600 /tmp/repo_private_key.rsa
+          echo "${{ secrets.APK_PRIVATE_KEY }}" > /tmp/repo_private_key.pem
+          chmod 600 /tmp/repo_private_key.pem
           
-          # 关键修改：将 alpine:latest 改为 alpine:3.19，使用兼容旧版 sign-key 的 apk 工具
-          docker run --rm -v $(pwd):/work -v /tmp:/tmp alpine:3.19 sh -c "
-            apk add --no-cache apk-tools &&
-            cd /work/packages &&
-            apk index --sign-key /tmp/repo_private_key.rsa -o packages.adb *.apk
-          "
+          # 使用 OpenWrt 官方的 ImageBuilder 镜像，降维打击
+          docker run --rm -v $(pwd):/work -v /tmp:/tmp ghcr.io/openwrt/imagebuilder:x86-64 bash -c '
+            cd /work/packages
+            
+            # 自动在 OpenWrt 官方编译环境中寻找对应的 apk v3 工具
+            APK_BIN=$(find /builder/staging_dir -name apk -type f -executable | head -n 1)
+            
+            if [ -z "$APK_BIN" ]; then
+              echo "未找到 staging_dir 里的 apk 工具，尝试调用全局 apk"
+              APK_BIN="apk"
+            fi
+            
+            echo "正在使用纯正 OpenWrt v3 打包工具: $APK_BIN"
+            
+            # 关键改变：使用 mkndx 命令和 --sign 参数生成最新的 packages.adb
+            "$APK_BIN" mkndx --sign /tmp/repo_private_key.pem --output packages.adb *.apk
+          '
           
-          rm -f /tmp/repo_private_key.rsa
+          rm -f /tmp/repo_private_key.pem
 
       - name: Commit and Push to Master
         run: |
