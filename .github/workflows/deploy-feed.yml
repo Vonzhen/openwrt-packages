@@ -5,7 +5,7 @@ on:
     branches:
       - master
   schedule:
-    - cron: '0 20 * * *'
+    - cron: '0 20 * * *' # 每天北京时间凌晨 4 点自动维护
   workflow_dispatch:
 
 permissions:
@@ -25,23 +25,57 @@ jobs:
         with:
           retries: 3 
 
-      - name: Sync Third-Party APKs
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clean up old shinra versions
         run: |
           mkdir -p packages
           cd packages
           
-          echo "==== 开始抓取 sing-box ===="
-          # 利用 GitHub API 智能获取 sing-box 绝对最新的版本号（无视正式版/预览版限制）
-          LATEST_SINGBOX=$(gh api repos/SagerNet/sing-box/releases | jq -r '.[0].tag_name')
-          echo "检测到 sing-box 最新版本为: $LATEST_SINGBOX"
+          echo "==== 开始检查 shinra 插件版本 ===="
+          shopt -s nullglob
+          files=(luci-app-shinra*.apk)
           
-          # 【修复点】：增加了 -R 参数指定远程仓库，并精准指定了刚获取到的最新版本号
-          gh release download "$LATEST_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber || echo "sing-box 下载失败"
+          # 如果发现存在多个 shinra 包，启动清理逻辑
+          if [ ${#files[@]} -gt 1 ]; then
+            echo "发现多个 shinra 版本，开始自动清理旧版..."
+            # 利用 ls -1v (Version sort) 按版本号自然排序，保留最后一个（即最新版）
+            newest=$(ls -1v luci-app-shinra*.apk | tail -n 1)
+            echo "保留最新版: $newest"
+            
+            # 删除其余旧版本
+            for f in "${files[@]}"; do
+              if [ "$f" != "$newest" ]; then
+                echo "删除旧版: $f"
+                rm -f "$f"
+              fi
+            done
+          else
+            echo "未发现冗余版本，无需清理。"
+          fi
+
+      - name: Sync Third-Party APKs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd packages
+          
+          echo "==== 开始抓取 sing-box ===="
+          # 1. 精准抓取最新稳定版 (Stable)
+          STABLE_SINGBOX=$(gh api repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
+          echo "检测到 sing-box 稳定版: $STABLE_SINGBOX"
+          gh release download "$STABLE_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber || echo "稳定版下载失败"
+          
+          # 2. 抓取最新时间线版本（含 Alpha/Beta 测试版）
+          LATEST_SINGBOX=$(gh api repos/SagerNet/sing-box/releases | jq -r '.[0].tag_name')
+          echo "检测到 sing-box 最新版: $LATEST_SINGBOX"
+          
+          # 判断测试版是否与稳定版重合，如果不重合，则双轨下载
+          if [ "$STABLE_SINGBOX" != "$LATEST_SINGBOX" ]; then
+            gh release download "$LATEST_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber || echo "测试版下载失败"
+          else
+            echo "当前最新发布即为稳定版，无需重复下载。"
+          fi
           
           echo "==== 开始抓取 nps-openwrt ===="
-          # nps 没有预览版机制，直接用 -R 参数抓取默认最新版即可
           gh release download -R djylb/nps-openwrt -p "luci-app-npc*.apk" --clobber || echo "luci-app-npc 下载失败"
           gh release download -R djylb/nps-openwrt -p "luci-i18n-npc*.apk" --clobber || echo "luci-i18n-npc 下载失败"
           gh release download -R djylb/nps-openwrt -p "npc-*_amd64.apk" --clobber || echo "npc_amd64 下载失败"
@@ -65,7 +99,8 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add packages/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "自动同步第三方最新的 APK 软件包" && git push origin master)
+          # 检查目录变动，如果是你手动扔了新 shinra 进来导致旧包被删，这里也会自动 Commit 这个删除动作
+          git diff --quiet && git diff --staged --quiet || (git commit -m "自动清理冗余版本并同步最新 APK" && git push origin master)
 
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
