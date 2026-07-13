@@ -46,28 +46,19 @@ jobs:
 
       - name: Generate and Sign ADB Index
         run: |
-          echo "${{ secrets.APK_PRIVATE_KEY }}" > /tmp/repo_private_key.pem
-          chmod 600 /tmp/repo_private_key.pem
+          # 将私钥生成在当前工作区，彻底规避跨容器挂载的 IO 权限报错
+          echo "${{ secrets.APK_PRIVATE_KEY }}" > repo_private_key.pem
+          chmod 600 repo_private_key.pem
           
-          # 使用 OpenWrt 官方的 ImageBuilder 镜像，降维打击
-          docker run --rm -v $(pwd):/work -v /tmp:/tmp ghcr.io/openwrt/imagebuilder:x86-64 bash -c '
+          # 召唤原生搭载 apk v3 的 Wolfi 容器进行极速索引和签名
+          docker run --rm -v $(pwd):/work cgr.dev/chainguard/wolfi-base sh -c "
             cd /work/packages
-            
-            # 自动在 OpenWrt 官方编译环境中寻找对应的 apk v3 工具
-            APK_BIN=$(find /builder/staging_dir -name apk -type f -executable | head -n 1)
-            
-            if [ -z "$APK_BIN" ]; then
-              echo "未找到 staging_dir 里的 apk 工具，尝试调用全局 apk"
-              APK_BIN="apk"
-            fi
-            
-            echo "正在使用纯正 OpenWrt v3 打包工具: $APK_BIN"
-            
-            # 关键改变：使用 mkndx 命令和 --sign 参数生成最新的 packages.adb
-            "$APK_BIN" mkndx --sign /tmp/repo_private_key.pem --output packages.adb *.apk
-          '
+            echo '正在使用纯正 apk v3 生成索引并签名...'
+            apk mkndx --sign /work/repo_private_key.pem --output packages.adb *.apk
+          "
           
-          rm -f /tmp/repo_private_key.pem
+          # 安全清理私钥
+          rm -f repo_private_key.pem
 
       - name: Commit and Push to Master
         run: |
