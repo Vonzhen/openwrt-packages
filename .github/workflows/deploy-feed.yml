@@ -5,7 +5,7 @@ on:
     branches:
       - master
   schedule:
-    - cron: '0 20 * * *' # 每天北京时间凌晨 4 点自动维护
+    - cron: '0 20 * * *'
   workflow_dispatch:
 
 permissions:
@@ -22,11 +22,10 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          retries: 3 
 
       - name: Clean up old shinra versions
         run: |
+          set -euo pipefail
           mkdir -p packages
           cd packages
           
@@ -34,14 +33,10 @@ jobs:
           shopt -s nullglob
           files=(luci-app-shinra*.apk)
           
-          # 如果发现存在多个 shinra 包，启动清理逻辑
           if [ ${#files[@]} -gt 1 ]; then
             echo "发现多个 shinra 版本，开始自动清理旧版..."
-            # 利用 ls -1v (Version sort) 按版本号自然排序，保留最后一个（即最新版）
             newest=$(ls -1v luci-app-shinra*.apk | tail -n 1)
             echo "保留最新版: $newest"
-            
-            # 删除其余旧版本
             for f in "${files[@]}"; do
               if [ "$f" != "$newest" ]; then
                 echo "删除旧版: $f"
@@ -56,51 +51,111 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd packages
+          set -euo pipefail
+          PACKAGE_DIR="$GITHUB_WORKSPACE/packages"
+          TEMP_DIR="$(mktemp -d)"
           
-          echo "==== 开始抓取 sing-box ===="
-          # 1. 精准抓取最新稳定版 (Stable)
+          # 无论成功失败，退出时自动清理临时目录
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+          
+          echo "==== 开始查询并下载新版 APK 到临时目录 ===="
+          
+          # 1. 抓取 sing-box 稳定版
           STABLE_SINGBOX=$(gh api repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
-          echo "检测到 sing-box 稳定版: $STABLE_SINGBOX"
-          gh release download "$STABLE_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber || echo "稳定版下载失败"
+          gh release download "$STABLE_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber -D "$TEMP_DIR"
           
-          # 2. 抓取最新时间线版本（含 Alpha/Beta 测试版）
+          # 2. 抓取 sing-box 最新时间线版本
           LATEST_SINGBOX=$(gh api repos/SagerNet/sing-box/releases | jq -r '.[0].tag_name')
-          echo "检测到 sing-box 最新版: $LATEST_SINGBOX"
-          
-          # 判断测试版是否与稳定版重合，如果不重合，则双轨下载
           if [ "$STABLE_SINGBOX" != "$LATEST_SINGBOX" ]; then
-            gh release download "$LATEST_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber || echo "测试版下载失败"
-          else
-            echo "当前最新发布即为稳定版，无需重复下载。"
+            gh release download "$LATEST_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber -D "$TEMP_DIR"
           fi
           
-          echo "==== 开始抓取 nps-openwrt ===="
-          gh release download -R djylb/nps-openwrt -p "luci-app-npc*.apk" --clobber || echo "luci-app-npc 下载失败"
-          gh release download -R djylb/nps-openwrt -p "luci-i18n-npc*.apk" --clobber || echo "luci-i18n-npc 下载失败"
-          gh release download -R djylb/nps-openwrt -p "npc-*_amd64.apk" --clobber || echo "npc_amd64 下载失败"
+          # 3. 抓取 nps-openwrt
+          gh release download -R djylb/nps-openwrt -p "luci-app-npc*.apk" --clobber -D "$TEMP_DIR"
+          gh release download -R djylb/nps-openwrt -p "luci-i18n-npc*.apk" --clobber -D "$TEMP_DIR"
+          gh release download -R djylb/nps-openwrt -p "npc-*_amd64.apk" --clobber -D "$TEMP_DIR"
+          
+          echo "==== 校验临时目录下载完整性 ===="
+          shopt -s nullglob
+          tmp_apks=("$TEMP_DIR"/*.apk)
+          if [ ${#tmp_apks[@]} -lt 4 ]; then
+            echo "错误：下载的 APK 数量不足，预期至少 4 个，实际 ${#tmp_apks[@]} 个"
+            exit 1
+          fi
+          
+          for file in "${tmp_apks[@]}"; do
+            test -s "$file" || { echo "错误：下载到空文件 $file"; exit 1; }
+          done
+          
+          echo "==== 校验通过，清理旧版自动同步软件 ===="
+          rm -f \
+            "$PACKAGE_DIR"/sing-box_*openwrt_x86_64.apk \
+            "$PACKAGE_DIR"/npc-*_amd64.apk \
+            "$PACKAGE_DIR"/luci-app-npc*.apk \
+            "$PACKAGE_DIR"/luci-i18n-npc*.apk
+            
+          echo "==== 将新版 APK 移入正式目录 ===="
+          mv "$TEMP_DIR"/*.apk "$PACKAGE_DIR"/
 
       - name: Generate and Sign ADB Index
+        env:
+          APK_PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
         run: |
-          echo "${{ secrets.APK_PRIVATE_KEY }}" > repo_private_key.pem
+          set -euo pipefail
+          
+          # 安全写入私钥并设置权限
+          printf '%s\n' "$APK_PRIVATE_KEY" > repo_private_key.pem
           chmod 600 repo_private_key.pem
           
-          docker run --rm -v $(pwd):/work alpine:edge sh -c "
+          # 确保运行结束后私钥被销毁
+          trap 'rm -f repo_private_key.pem' EXIT
+          
+          # 注意：纯正的 Alpine Edge (APK v3 mkndx) 支持的签名参数确认为 --sign
+          docker run --rm -v "$GITHUB_WORKSPACE":/work alpine:edge sh -c "
+            set -euo pipefail
             apk add --no-cache --upgrade apk-tools
             cd /work/packages
-            echo '正在使用纯正 apk v3 (mkndx) 生成索引并强制放行第三方包...'
-            apk --allow-untrusted mkndx --sign /work/repo_private_key.pem --output packages.adb *.apk
+            echo '正在生成临时索引 packages.adb.new ...'
+            apk --allow-untrusted mkndx --sign /work/repo_private_key.pem --output packages.adb.new *.apk
+            
+            echo '校验临时索引非空并替换正式索引...'
+            test -s packages.adb.new
+            mv packages.adb.new packages.adb
           "
+
+      - name: Verify Repository Integrity
+        run: |
+          set -euo pipefail
+          PACKAGE_DIR="$GITHUB_WORKSPACE/packages"
+          shopt -s nullglob
           
-          rm -f repo_private_key.pem
+          echo "==== 最终完整性断言检查 ===="
+          for file in "$PACKAGE_DIR"/*.apk; do
+              test -s "$file" || { echo "失败：发现空 APK 文件 $file"; exit 1; }
+          done
+          
+          sb=("$PACKAGE_DIR"/sing-box_*openwrt_x86_64.apk)
+          nc=("$PACKAGE_DIR"/npc-*_amd64.apk)
+          nl=("$PACKAGE_DIR"/luci-app-npc*.apk)
+          ni=("$PACKAGE_DIR"/luci-i18n-npc*.apk)
+          sh=("$PACKAGE_DIR"/luci-app-shinra*.apk)
+          
+          [[ ${#sb[@]} -ge 1 && ${#sb[@]} -le 2 ]] || { echo "失败：sing-box 数量异常 (${#sb[@]})"; exit 1; }
+          [[ ${#nc[@]} -eq 1 ]] || { echo "失败：npc 核心数量异常 (${#nc[@]})"; exit 1; }
+          [[ ${#nl[@]} -eq 1 ]] || { echo "失败：luci-app-npc 数量异常 (${#nl[@]})"; exit 1; }
+          [[ ${#ni[@]} -eq 1 ]] || { echo "失败：luci-i18n-npc 数量异常 (${#ni[@]})"; exit 1; }
+          [[ ${#sh[@]} -eq 1 ]] || { echo "失败：luci-app-shinra 数量异常 (${#sh[@]})"; exit 1; }
+          
+          test -s "$PACKAGE_DIR/packages.adb" || { echo "失败：packages.adb 丢失或为空"; exit 1; }
+          echo "仓库完整性检查全部通过！"
 
       - name: Commit and Push to Master
         run: |
+          set -euo pipefail
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add packages/
-          # 检查目录变动，如果是你手动扔了新 shinra 进来导致旧包被删，这里也会自动 Commit 这个删除动作
-          git diff --quiet && git diff --staged --quiet || (git commit -m "自动清理冗余版本并同步最新 APK" && git push origin master)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Automated feed sync and cleanup" && git push origin master)
 
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
