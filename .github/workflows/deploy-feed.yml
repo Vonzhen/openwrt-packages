@@ -49,8 +49,8 @@ jobs:
           echo "${{ secrets.APK_PRIVATE_KEY }}" > /tmp/repo_private_key.rsa
           chmod 600 /tmp/repo_private_key.rsa
           
-          # 借助 alpine 容器生成索引
-          docker run --rm -v $(pwd):/work -v /tmp:/tmp alpine:latest sh -c "
+          # 关键修改：将 alpine:latest 改为 alpine:3.19，使用兼容旧版 sign-key 的 apk 工具
+          docker run --rm -v $(pwd):/work -v /tmp:/tmp alpine:3.19 sh -c "
             apk add --no-cache apk-tools &&
             cd /work/packages &&
             apk index --sign-key /tmp/repo_private_key.rsa -o packages.adb *.apk
