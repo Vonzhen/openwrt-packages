@@ -5,13 +5,12 @@ on:
     branches:
       - master
   schedule:
-    - cron: '0 20 * * *' # 每天北京时间凌晨 4 点自动同步
+    - cron: '0 20 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# 加入全局重试策略，应对 GitHub 官方服务器不稳定的情况
 defaults:
   run:
     shell: bash
@@ -24,7 +23,6 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          # 如果因为服务器问题失败，最多重试 3 次
           retries: 3 
 
       - name: Sync Third-Party APKs
@@ -35,14 +33,18 @@ jobs:
           cd packages
           
           echo "==== 开始抓取 sing-box ===="
-          # 匹配规则：*openwrt_x86_64.apk
-          gh release download SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber || echo "sing-box 暂无新版"
+          # 利用 GitHub API 智能获取 sing-box 绝对最新的版本号（无视正式版/预览版限制）
+          LATEST_SINGBOX=$(gh api repos/SagerNet/sing-box/releases | jq -r '.[0].tag_name')
+          echo "检测到 sing-box 最新版本为: $LATEST_SINGBOX"
+          
+          # 【修复点】：增加了 -R 参数指定远程仓库，并精准指定了刚获取到的最新版本号
+          gh release download "$LATEST_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber || echo "sing-box 下载失败"
           
           echo "==== 开始抓取 nps-openwrt ===="
-          # 匹配规则：抓取包含 luci-app-npc、luci-i18n-npc 以及 npc 的 x86_64/amd64 相关包
-          gh release download djylb/nps-openwrt -p "luci-app-npc*.apk" --clobber || echo "luci-app-npc 下载失败"
-          gh release download djylb/nps-openwrt -p "luci-i18n-npc*.apk" --clobber || echo "luci-i18n-npc 下载失败"
-          gh release download djylb/nps-openwrt -p "npc-*_amd64.apk" --clobber || echo "npc_amd64 下载失败"
+          # nps 没有预览版机制，直接用 -R 参数抓取默认最新版即可
+          gh release download -R djylb/nps-openwrt -p "luci-app-npc*.apk" --clobber || echo "luci-app-npc 下载失败"
+          gh release download -R djylb/nps-openwrt -p "luci-i18n-npc*.apk" --clobber || echo "luci-i18n-npc 下载失败"
+          gh release download -R djylb/nps-openwrt -p "npc-*_amd64.apk" --clobber || echo "npc_amd64 下载失败"
 
       - name: Generate and Sign ADB Index
         run: |
@@ -53,8 +55,6 @@ jobs:
             apk add --no-cache --upgrade apk-tools
             cd /work/packages
             echo '正在使用纯正 apk v3 (mkndx) 生成索引并强制放行第三方包...'
-            
-            # 【关键修改】在 apk 和 mkndx 之间，加上 --allow-untrusted 全局放行参数
             apk --allow-untrusted mkndx --sign /work/repo_private_key.pem --output packages.adb *.apk
           "
           
@@ -65,7 +65,6 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add packages/
-          # 只有当文件夹内真的下载了新包或更新了索引，才提交代码
           git diff --quiet && git diff --staged --quiet || (git commit -m "自动同步第三方最新的 APK 软件包" && git push origin master)
 
       - name: Deploy to GitHub Pages
