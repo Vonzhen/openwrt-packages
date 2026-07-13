@@ -50,10 +50,14 @@ jobs:
           echo "${{ secrets.APK_PRIVATE_KEY }}" > repo_private_key.pem
           chmod 600 repo_private_key.pem
           
-          # 召唤原生搭载 apk v3 的 Wolfi 容器进行极速索引和签名
-          docker run --rm -v $(pwd):/work cgr.dev/chainguard/wolfi-base sh -c "
+          # 召唤 Alpine Linux 的前沿滚动版 (Edge)，完美支持纯正的 apk v3
+          docker run --rm -v $(pwd):/work alpine:edge sh -c "
+            # 强制升级容器内的 apk-tools，确保获取到最新的 3.x 版本
+            apk add --no-cache --upgrade apk-tools
+            
             cd /work/packages
-            echo '正在使用纯正 apk v3 生成索引并签名...'
+            echo '正在使用纯正 apk v3 (mkndx) 生成索引并签名...'
+            # 正规军的 v3 专属命令和参数
             apk mkndx --sign /work/repo_private_key.pem --output packages.adb *.apk
           "
           
