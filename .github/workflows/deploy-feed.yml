@@ -1,0 +1,43 @@
+name: Update OpenWrt APK Feed
+
+on:
+  push:
+    branches:
+      - master # 监听 master 分支的变动
+  workflow_dispatch: # 支持手动点击按钮触发
+
+permissions:
+  contents: write
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest # 借用 Alpine 环境自带的 apk 工具
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install APK Tools
+        run: apk add --no-search --no-cache apk-tools
+
+      - name: Prepare Private Key
+        run: |
+          echo "${{ secrets.APK_PRIVATE_KEY }}" > /tmp/repo_private.rsa
+          chmod 600 /tmp/repo_private.rsa
+
+      - name: Generate and Sign ADB Index
+        run: |
+          cd packages
+          # 扫描 packages 文件夹下的所有 apk 并使用通用私钥签名生成 packages.adb
+          apk index --sign-key /tmp/repo_private_key.rsa -o packages.adb *.apk
+
+      - name: Clean up Private Key
+        run: rm -f /tmp/repo_private.rsa
+
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: packages
+          branch: gh-pages # 编译成果物自动发布到 gh-pages 分支
