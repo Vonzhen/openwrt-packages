@@ -3,41 +3,71 @@ name: Update OpenWrt APK Feed
 on:
   push:
     branches:
-      - master # 监听 master 分支的变动
-  workflow_dispatch: # 支持手动点击按钮触发
+      - master
+  schedule:
+    - cron: '0 20 * * *' # 每天北京时间凌晨 4 点自动同步
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# 加入全局重试策略，应对 GitHub 官方服务器不稳定的情况
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build-index:
     runs-on: ubuntu-latest
-    container:
-      image: alpine:latest # 借用 Alpine 环境自带的 apk 工具
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          # 如果因为服务器问题失败，最多重试 3 次
+          retries: 3 
 
-      - name: Install APK Tools
-        run: apk add --no-search --no-cache apk-tools
-
-      - name: Prepare Private Key
+      - name: Sync Third-Party APKs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "${{ secrets.APK_PRIVATE_KEY }}" > /tmp/repo_private.rsa
-          chmod 600 /tmp/repo_private.rsa
+          mkdir -p packages
+          cd packages
+          
+          echo "==== 开始抓取 sing-box ===="
+          # 匹配规则：*openwrt_x86_64.apk
+          gh release download SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber || echo "sing-box 暂无新版"
+          
+          echo "==== 开始抓取 nps-openwrt ===="
+          # 匹配规则：抓取包含 luci-app-npc、luci-i18n-npc 以及 npc 的 x86_64/amd64 相关包
+          gh release download djylb/nps-openwrt -p "luci-app-npc*.apk" --clobber || echo "luci-app-npc 下载失败"
+          gh release download djylb/nps-openwrt -p "luci-i18n-npc*.apk" --clobber || echo "luci-i18n-npc 下载失败"
+          gh release download djylb/nps-openwrt -p "npc-*_amd64.apk" --clobber || echo "npc_amd64 下载失败"
 
       - name: Generate and Sign ADB Index
         run: |
-          cd packages
-          # 扫描 packages 文件夹下的所有 apk 并使用通用私钥签名生成 packages.adb
-          apk index --sign-key /tmp/repo_private_key.rsa -o packages.adb *.apk
+          echo "${{ secrets.APK_PRIVATE_KEY }}" > /tmp/repo_private_key.rsa
+          chmod 600 /tmp/repo_private_key.rsa
+          
+          # 借助 alpine 容器生成索引
+          docker run --rm -v $(pwd):/work -v /tmp:/tmp alpine:latest sh -c "
+            apk add --no-cache apk-tools &&
+            cd /work/packages &&
+            apk index --sign-key /tmp/repo_private_key.rsa -o packages.adb *.apk
+          "
+          
+          rm -f /tmp/repo_private_key.rsa
 
-      - name: Clean up Private Key
-        run: rm -f /tmp/repo_private.rsa
+      - name: Commit and Push to Master
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add packages/
+          # 只有当文件夹内真的下载了新包或更新了索引，才提交代码
+          git diff --quiet && git diff --staged --quiet || (git commit -m "自动同步第三方最新的 APK 软件包" && git push origin master)
 
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
         with:
           folder: packages
-          branch: gh-pages # 编译成果物自动发布到 gh-pages 分支
+          branch: gh-pages
