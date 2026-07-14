@@ -44,7 +44,7 @@ for source in "$INPUT_DIR"/*.apk; do
     *[!A-Za-z0-9._+~:-]*) fail "元数据包含不安全字符：$name $version $arch" ;;
   esac
   case "$arch" in
-    x86_64|all) ;;
+    x86_64|noarch|all) ;;
     *) fail "不支持的架构 $arch：$source" ;;
   esac
 
