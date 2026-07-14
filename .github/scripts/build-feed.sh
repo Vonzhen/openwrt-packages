@@ -135,17 +135,26 @@ printf '%s\n' 'http://127.0.0.1:8080/packages.adb' > "$BUILD_DIR/repositories"
 
 echo '==== 使用真实 apk 客户端逐版本下载（连通性） ===='
 apk --repositories-file "$BUILD_DIR/repositories" --cache-dir "$BUILD_DIR/cache-untrusted" update --allow-untrusted
+package_number=0
 while IFS="$(printf '\t')" read -r name version arch canonical; do
-  rm -f "$FETCH_DIR/$canonical"
-  apk --repositories-file "$BUILD_DIR/repositories" \
+  package_number=$((package_number + 1))
+  install_root="$BUILD_DIR/root-$package_number"
+  mkdir -p "$install_root"
+
+  # 这里验证自定义仓库中的目标包，不要求该仓库包含完整的 OpenWrt 系统依赖。
+  apk --root "$install_root" \
+    --repositories-file "$BUILD_DIR/repositories" \
     --cache-dir "$BUILD_DIR/cache-untrusted" \
-    fetch --allow-untrusted --output "$FETCH_DIR" --pkgname-spec '${name}-${version}.apk' "$name=$version"
+    add --allow-untrusted --initdb --no-scripts --force-broken-world "$name=$version"
+
+  rm -f "$FETCH_DIR/$canonical"
+  wget -q -O "$FETCH_DIR/$canonical" "http://127.0.0.1:8080/$canonical"
   test -s "$FETCH_DIR/$canonical" || fail "客户端未下载到 $canonical"
   cmp -s "$NORMALIZED_DIR/$canonical" "$FETCH_DIR/$canonical" || fail "HTTP 下载内容与源 APK 不一致：$canonical"
 done < "$FINAL_MANIFEST"
 
 echo '==== 使用仓库公钥验证索引签名 ===='
-mkdir -p "$BUILD_DIR/keys" "$BUILD_DIR/cache-trusted" "$BUILD_DIR/fetched-trusted"
+mkdir -p "$BUILD_DIR/keys" "$BUILD_DIR/cache-trusted" "$BUILD_DIR/root-trusted"
 cp "$PUBLIC_KEY" "$BUILD_DIR/keys/openwrt-packages-addon.pem"
 apk --repositories-file "$BUILD_DIR/repositories" \
   --keys-dir "$BUILD_DIR/keys" \
@@ -153,10 +162,11 @@ apk --repositories-file "$BUILD_DIR/repositories" \
 
 first_name=$(awk -F '\t' 'NR == 1 { print $1 }' "$FINAL_MANIFEST")
 first_version=$(awk -F '\t' 'NR == 1 { print $2 }' "$FINAL_MANIFEST")
-apk --repositories-file "$BUILD_DIR/repositories" \
+apk --root "$BUILD_DIR/root-trusted" \
+  --repositories-file "$BUILD_DIR/repositories" \
   --keys-dir "$BUILD_DIR/keys" \
   --cache-dir "$BUILD_DIR/cache-trusted" \
-  fetch --output "$BUILD_DIR/fetched-trusted" --pkgname-spec '${name}-${version}.apk' "$first_name=$first_version"
+  add --initdb --no-scripts --force-broken-world "$first_name=$first_version"
 
 kill "$HTTPD_PID"
 wait "$HTTPD_PID" 2>/dev/null || true
