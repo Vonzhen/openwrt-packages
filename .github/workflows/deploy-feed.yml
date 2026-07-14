@@ -82,7 +82,7 @@ jobs:
             -v "$RUNNER_TEMP/feed-input:/input:ro" \
             alpine:edge@sha256:9a341ff2287c54b86425cbee0141114d811ae69d88a36019087be6d896cef241 \
             sh -euxc '
-              apk add --no-cache jq
+              apk add --no-cache jq busybox-extras
               sh /work/.github/scripts/build-feed.sh /input /work
             '
 

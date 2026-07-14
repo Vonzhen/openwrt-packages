@@ -118,7 +118,7 @@ cmp -s "$BUILD_DIR/expected-index.tsv" "$INDEX_MANIFEST" || {
 mv "$NORMALIZED_DIR/packages.adb.new" "$NORMALIZED_DIR/packages.adb"
 
 echo '==== 启动本地 HTTP 仓库并等待就绪 ===='
-busybox httpd -f -p 8080 -h "$NORMALIZED_DIR" &
+httpd -f -p 8080 -h "$NORMALIZED_DIR" &
 HTTPD_PID=$!
 ready=false
 for delay in 1 1 2 3 5; do
