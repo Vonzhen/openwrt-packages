@@ -23,30 +23,6 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Clean up old shinra versions
-        run: |
-          set -euo pipefail
-          mkdir -p packages
-          cd packages
-          
-          echo "==== 开始检查 shinra 插件版本 ===="
-          shopt -s nullglob
-          files=(luci-app-shinra*.apk)
-          
-          if [ ${#files[@]} -gt 1 ]; then
-            echo "发现多个 shinra 版本，开始自动清理旧版..."
-            newest=$(ls -1v luci-app-shinra*.apk | tail -n 1)
-            echo "保留最新版: $newest"
-            for f in "${files[@]}"; do
-              if [ "$f" != "$newest" ]; then
-                echo "删除旧版: $f"
-                rm -f "$f"
-              fi
-            done
-          else
-            echo "未发现冗余版本，无需清理。"
-          fi
-
       - name: Sync Third-Party APKs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,22 +31,18 @@ jobs:
           PACKAGE_DIR="$GITHUB_WORKSPACE/packages"
           TEMP_DIR="$(mktemp -d)"
           
-          # 无论成功失败，退出时自动清理临时目录
           trap 'rm -rf "$TEMP_DIR"' EXIT
           
           echo "==== 开始查询并下载新版 APK 到临时目录 ===="
           
-          # 1. 抓取 sing-box 稳定版
           STABLE_SINGBOX=$(gh api repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
           gh release download "$STABLE_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber -D "$TEMP_DIR"
           
-          # 2. 抓取 sing-box 最新时间线版本
           LATEST_SINGBOX=$(gh api repos/SagerNet/sing-box/releases | jq -r '.[0].tag_name')
           if [ "$STABLE_SINGBOX" != "$LATEST_SINGBOX" ]; then
             gh release download "$LATEST_SINGBOX" -R SagerNet/sing-box -p "*openwrt_x86_64.apk" --clobber -D "$TEMP_DIR"
           fi
           
-          # 3. 抓取 nps-openwrt
           gh release download -R djylb/nps-openwrt -p "luci-app-npc*.apk" --clobber -D "$TEMP_DIR"
           gh release download -R djylb/nps-openwrt -p "luci-i18n-npc*.apk" --clobber -D "$TEMP_DIR"
           gh release download -R djylb/nps-openwrt -p "npc-*_amd64.apk" --clobber -D "$TEMP_DIR"
@@ -87,40 +59,103 @@ jobs:
             test -s "$file" || { echo "错误：下载到空文件 $file"; exit 1; }
           done
           
-          echo "==== 校验通过，清理旧版自动同步软件 ===="
-          rm -f \
-            "$PACKAGE_DIR"/sing-box_*openwrt_x86_64.apk \
-            "$PACKAGE_DIR"/npc-*_amd64.apk \
-            "$PACKAGE_DIR"/luci-app-npc*.apk \
-            "$PACKAGE_DIR"/luci-i18n-npc*.apk
+          echo "==== 校验通过，清理正式目录中的旧版第三方包 ===="
+          # 使用通配符彻底拔除旧有的各类非规范命名包
+          rm -f "$PACKAGE_DIR"/sing-box*.apk \
+                "$PACKAGE_DIR"/npc*.apk \
+                "$PACKAGE_DIR"/luci-app-npc*.apk \
+                "$PACKAGE_DIR"/luci-i18n-npc*.apk
             
           echo "==== 将新版 APK 移入正式目录 ===="
           mv "$TEMP_DIR"/*.apk "$PACKAGE_DIR"/
 
-      - name: Generate and Sign ADB Index
+      - name: Normalize APK Filenames
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/packages"
+          echo "==== 根据内部元数据重命名所有 APK 为规范名称 ===="
+          shopt -s nullglob
+          
+          for file in *.apk; do
+            # 利用 tar 从包内抽取 .PKGINFO 元数据文件（屏蔽合并包带来的警告）
+            pkgname=$(tar -xzf "$file" .PKGINFO -O 2>/dev/null | grep '^pkgname = ' | sed 's/^pkgname = //' || true)
+            pkgver=$(tar -xzf "$file" .PKGINFO -O 2>/dev/null | grep '^pkgver = ' | sed 's/^pkgver = //' || true)
+            
+            if [ -n "$pkgname" ] && [ -n "$pkgver" ]; then
+              canonical="${pkgname}-${pkgver}.apk"
+              if [ "$file" != "$canonical" ]; then
+                echo "执行重命名: $file -> $canonical"
+                mv "$file" "$canonical"
+              fi
+            else
+              echo "错误：无法从 $file 提取规范包名和版本！"
+              exit 1
+            fi
+          done
+
+      - name: Clean up old shinra versions
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/packages"
+          echo "==== 开始检查并清理旧版 shinra 插件 ===="
+          shopt -s nullglob
+          
+          # 此时的文件已经是类似 luci-app-shinra-1.0.1.apk 的规范名称
+          files=(luci-app-shinra-*.apk)
+          
+          if [ ${#files[@]} -gt 1 ]; then
+            echo "发现多个 shinra 版本，执行自动清理..."
+            newest=$(ls -1v luci-app-shinra-*.apk | tail -n 1)
+            echo "保留最新版: $newest"
+            for f in "${files[@]}"; do
+              if [ "$f" != "$newest" ]; then
+                echo "删除旧版: $f"
+                rm -f "$f"
+              fi
+            done
+          else
+            echo "未发现冗余版本，无需清理。"
+          fi
+
+      - name: Generate Index and Verify HTTP Fetch
         env:
           APK_PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          
-          # 安全写入私钥并设置权限
           printf '%s\n' "$APK_PRIVATE_KEY" > repo_private_key.pem
           chmod 600 repo_private_key.pem
-          
-          # 确保运行结束后私钥被销毁
           trap 'rm -f repo_private_key.pem' EXIT
           
-          # 注意：纯正的 Alpine Edge (APK v3 mkndx) 支持的签名参数确认为 --sign
-          docker run --rm -v "$GITHUB_WORKSPACE":/work alpine:edge sh -c "
-            set -euo pipefail
+          # 使用 sh -euxc 进行命令追溯
+          docker run --rm -v "$GITHUB_WORKSPACE":/work alpine:edge sh -euxc "
             apk add --no-cache --upgrade apk-tools
             cd /work/packages
             echo '正在生成临时索引 packages.adb.new ...'
             apk --allow-untrusted mkndx --sign /work/repo_private_key.pem --output packages.adb.new *.apk
             
-            echo '校验临时索引非空并替换正式索引...'
+            echo '=== 执行索引深层二进制与体积校验 ==='
             test -s packages.adb.new
-            mv packages.adb.new packages.adb
+            grep -aq 'luci-app-shinra' packages.adb.new
+            grep -aq 'sing-box' packages.adb.new
+            grep -aq 'npc' packages.adb.new
+            
+            echo '=== 启动本地 Web 服务模拟 GitHub Pages ==='
+            busybox httpd -p 8080 -h /work/packages
+            echo 'http://localhost:8080' > /etc/apk/repositories
+            apk update --allow-untrusted
+            
+            echo '=== 驱动真实 apk 客户端校验所有文件下载连通性 ==='
+            mkdir -p /tmp/verify
+            cd /tmp/verify
+            for file in /work/packages/*.apk; do
+              # 再次提取包名用于客户端请求测试
+              pkgname=\$(tar -xzf \"\$file\" .PKGINFO -O 2>/dev/null | grep '^pkgname = ' | sed 's/^pkgname = //')
+              echo \"发起 HTTP 模拟下载: \$pkgname\"
+              apk fetch --allow-untrusted \"\$pkgname\"
+            done
+            
+            echo '全网段 HTTP 验证成功！将临时索引转正。'
+            mv /work/packages/packages.adb.new /work/packages/packages.adb
           "
 
       - name: Verify Repository Integrity
@@ -129,16 +164,17 @@ jobs:
           PACKAGE_DIR="$GITHUB_WORKSPACE/packages"
           shopt -s nullglob
           
-          echo "==== 最终完整性断言检查 ===="
+          echo "==== 最终规范化完整性断言检查 ===="
           for file in "$PACKAGE_DIR"/*.apk; do
               test -s "$file" || { echo "失败：发现空 APK 文件 $file"; exit 1; }
           done
           
-          sb=("$PACKAGE_DIR"/sing-box_*openwrt_x86_64.apk)
-          nc=("$PACKAGE_DIR"/npc-*_amd64.apk)
-          nl=("$PACKAGE_DIR"/luci-app-npc*.apk)
-          ni=("$PACKAGE_DIR"/luci-i18n-npc*.apk)
-          sh=("$PACKAGE_DIR"/luci-app-shinra*.apk)
+          # 校验匹配规则同步切换至规范命名格式的横杠 (-)
+          sb=("$PACKAGE_DIR"/sing-box-*.apk)
+          nc=("$PACKAGE_DIR"/npc-*.apk)
+          nl=("$PACKAGE_DIR"/luci-app-npc-*.apk)
+          ni=("$PACKAGE_DIR"/luci-i18n-npc-*.apk)
+          sh=("$PACKAGE_DIR"/luci-app-shinra-*.apk)
           
           [[ ${#sb[@]} -ge 1 && ${#sb[@]} -le 2 ]] || { echo "失败：sing-box 数量异常 (${#sb[@]})"; exit 1; }
           [[ ${#nc[@]} -eq 1 ]] || { echo "失败：npc 核心数量异常 (${#nc[@]})"; exit 1; }
@@ -147,7 +183,7 @@ jobs:
           [[ ${#sh[@]} -eq 1 ]] || { echo "失败：luci-app-shinra 数量异常 (${#sh[@]})"; exit 1; }
           
           test -s "$PACKAGE_DIR/packages.adb" || { echo "失败：packages.adb 丢失或为空"; exit 1; }
-          echo "仓库完整性检查全部通过！"
+          echo "仓库完整性断言全部通过！"
 
       - name: Commit and Push to Master
         run: |
@@ -155,7 +191,7 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add packages/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Automated feed sync and cleanup" && git push origin master)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Automated normalization, strict verification and sync" && git push origin master)
 
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
