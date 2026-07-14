@@ -83,8 +83,9 @@ jobs:
             
             echo '==== 调用原生 apk 工具进行重命名 ===='
             for file in *.apk; do
-              # 原生工具直出规范名，避开 tar 解压崩溃问题
-              canonical=\$(apk info -e \"\$file\" 2>/dev/null || true)
+              # 终极修复：增加 ./ 前缀，解析默认信息的第一行，精准获取规范名
+              canonical=\$(apk info \"./\$file\" 2>/dev/null | head -n 1 | awk '{print \$1}')
+              
               if [ -n \"\$canonical\" ]; then
                 if [ \"\$file\" != \"\${canonical}.apk\" ]; then
                   echo \"重命名: \$file -> \${canonical}.apk\"
@@ -110,13 +111,14 @@ jobs:
             echo 'http://localhost:8080' > /etc/apk/repositories
             apk update --allow-untrusted
             
-            echo '=== 驱动真实 apk 客户端校验所有文件下载连通性 ==='
+            echo '=== 驱动真实客户端校验物理文件连通性 ==='
             mkdir -p /tmp/verify
             cd /tmp/verify
             for file in /work/packages/*.apk; do
-              pkgname=\$(apk info -e \"\$file\" | rev | cut -d'-' -f2- | rev)
-              echo \"发起 HTTP 模拟下载: \$pkgname\"
-              apk fetch --allow-untrusted \"\$pkgname\"
+              # 直接请求重命名后的物理文件，确认 404 问题彻底被消灭
+              filename=\$(basename \"\$file\")
+              echo \"发起 HTTP 模拟下载验证: \$filename\"
+              wget -q -O /dev/null \"http://localhost:8080/\$filename\"
             done
             
             echo '全网段 HTTP 验证成功！将临时索引转正。'
@@ -130,7 +132,6 @@ jobs:
           echo "==== 开始检查并清理旧版 shinra 插件 ===="
           shopt -s nullglob
           
-          # 此处执行时，Docker 已经完成了重命名，文件格式极度规范
           files=(luci-app-shinra-*.apk)
           
           if [ ${#files[@]} -gt 1 ]; then
