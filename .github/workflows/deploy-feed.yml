@@ -126,11 +126,26 @@ jobs:
           chmod 600 repo_private_key.pem
           trap 'rm -f repo_private_key.pem' EXIT
           
-          # 使用 sh -euxc 进行命令追溯
           docker run --rm -v "$GITHUB_WORKSPACE":/work alpine:edge sh -euxc "
             apk add --no-cache --upgrade apk-tools
             cd /work/packages
-            echo '正在生成临时索引 packages.adb.new ...'
+            
+            echo '==== 调用原生 apk 工具进行重命名 ===='
+            for file in *.apk; do
+              # 原生工具直出，例如输出: sing-box-1.14.0_alpha43-r0
+              canonical=\$(apk info -e \"\$file\" 2>/dev/null || true)
+              if [ -n \"\$canonical\" ]; then
+                if [ \"\$file\" != \"\${canonical}.apk\" ]; then
+                  echo \"重命名: \$file -> \${canonical}.apk\"
+                  mv \"\$file\" \"\${canonical}.apk\"
+                fi
+              else
+                echo \"致命错误: apk-tools 无法识别 \$file\"
+                exit 1
+              fi
+            done
+            
+            echo '==== 正在生成临时索引 packages.adb.new ===='
             apk --allow-untrusted mkndx --sign /work/repo_private_key.pem --output packages.adb.new *.apk
             
             echo '=== 执行索引深层二进制与体积校验 ==='
@@ -148,8 +163,7 @@ jobs:
             mkdir -p /tmp/verify
             cd /tmp/verify
             for file in /work/packages/*.apk; do
-              # 再次提取包名用于客户端请求测试
-              pkgname=\$(tar -xzf \"\$file\" .PKGINFO -O 2>/dev/null | grep '^pkgname = ' | sed 's/^pkgname = //')
+              pkgname=\$(apk info -e \"\$file\" | rev | cut -d'-' -f2- | rev)
               echo \"发起 HTTP 模拟下载: \$pkgname\"
               apk fetch --allow-untrusted \"\$pkgname\"
             done
